@@ -7,3 +7,4 @@ stmol==0.0.9
 streamlit==1.67.0
 biopython==1.88
 pandas==3.1.1
+ipython_genutils

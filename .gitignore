@@ -1,0 +1,24 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Generated molecule files
+*.gjf
+*.com
+*.chk
+# keep example inputs if any are committed deliberately
+!examples/*.gjf
+
+# OS / editor
+.DS_Store

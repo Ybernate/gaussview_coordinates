@@ -106,6 +106,58 @@ def test_metal_complex_uff():
     print(info)
 
 
+def test_genecp_ecp_tail():
+    print("[genecp mixed-basis tail for a Pt complex]")
+    from molgauss import build_genecp_tail, write_gjf, RouteConfig
+    from molgauss.molmodel import Atom, Molecule3D
+
+    mol = Molecule3D(
+        atoms=[Atom("Pt", 0, 0, 0), Atom("C", 2, 0, 0), Atom("O", 3, 0, 0),
+               Atom("H", 2, 1, 0)],
+        charge=0, multiplicity=1, name="ptco",
+    )
+    tail = build_genecp_tail(mol, light_basis="6-31G(d)", heavy_basis="LANL2DZ", ecp="LANL2DZ")
+    _assert("Pt 0" in tail, "heavy element Pt listed in genecp block")
+    _assert("6-31G(d)" in tail, "light basis present")
+    _assert("LANL2DZ" in tail, "ECP name present")
+    _assert(tail.count("****") == 2, "two **** basis terminators")
+    gjf = write_gjf(mol, RouteConfig(route="# opt b3lyp/genecp", tail=tail))
+    _assert("genecp" in gjf, "genecp route")
+    _assert(gjf.endswith("\n\n"), "mandatory trailing blank line preserved")
+    # Light-only molecule should produce no tail.
+    light = Molecule3D(atoms=[Atom("C", 0, 0, 0), Atom("H", 1, 0, 0)])
+    _assert(build_genecp_tail(light) == "", "no genecp tail when no heavy atoms")
+
+
+def test_freeze_column():
+    print("[frozen atoms -> -1 freeze code]")
+    from molgauss import write_gjf, RouteConfig, editor
+    from molgauss.molmodel import Atom, Molecule3D
+
+    mol = Molecule3D(
+        atoms=[Atom("C", 0, 0, 0), Atom("H", 0, 0, 1.0), Atom("H", 0, 1.0, 0)],
+        name="frz",
+    )
+    # No freeze by default -> no freeze column.
+    plain = write_gjf(mol)
+    _assert(" C          " in plain or " C " in plain, "plain atom line")
+    _assert(" -1 " not in plain and "  0 " not in plain, "no freeze column by default")
+    # Freeze first atom.
+    editor.set_frozen(mol, 0, True)
+    out = write_gjf(mol)
+    lines = [ln for ln in out.splitlines() if ln.strip().startswith(("C", "H"))]
+    _assert(lines[0].split()[1] == "-1", f"first atom frozen (-1): {lines[0]!r}")
+    _assert(lines[1].split()[1] == "0", f"second atom free (0): {lines[1]!r}")
+    # freeze_all then unfreeze.
+    editor.freeze_all(mol, True)
+    out2 = write_gjf(mol)
+    frozen_lines = [ln for ln in out2.splitlines() if ln.strip().startswith(("C", "H"))]
+    _assert(all(ln.split()[1] == "-1" for ln in frozen_lines), "all atoms frozen")
+    editor.freeze_all(mol, False)
+    out3 = write_gjf(mol)
+    _assert(" -1 " not in out3, "freeze column dropped when nothing frozen")
+
+
 def test_name_lookup_optional():
     print("[PubChem name lookup: aspirin] (network optional)")
     try:
@@ -128,6 +180,8 @@ if __name__ == "__main__":
         test_peptide,
         test_xyz_roundtrip_and_editor,
         test_metal_complex_uff,
+        test_genecp_ecp_tail,
+        test_freeze_column,
         test_name_lookup_optional,
     ]
     failed = 0

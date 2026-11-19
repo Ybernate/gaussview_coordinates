@@ -32,18 +32,24 @@ def atomic_number_to_symbol(z: int) -> str:
 
 @dataclass
 class Atom:
-    """A single atom with a 3D position (angstrom)."""
+    """A single atom with a 3D position (angstrom).
+
+    ``frozen`` marks the atom to be held fixed during a Gaussian geometry
+    optimization (written as a ``-1`` freeze code in the input file).
+    """
 
     symbol: str
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
+    frozen: bool = False
 
     def __post_init__(self) -> None:
         # Normalise the element symbol and validate it eagerly.
         self.symbol = self.symbol.strip().capitalize()
         symbol_to_atomic_number(self.symbol)  # validation
         self.x, self.y, self.z = float(self.x), float(self.y), float(self.z)
+        self.frozen = bool(self.frozen)
 
     @property
     def atomic_number(self) -> int:
@@ -160,7 +166,7 @@ class Molecule3D:
 
     def copy(self) -> "Molecule3D":
         return Molecule3D(
-            atoms=[Atom(a.symbol, a.x, a.y, a.z) for a in self.atoms],
+            atoms=[Atom(a.symbol, a.x, a.y, a.z, a.frozen) for a in self.atoms],
             charge=self.charge,
             multiplicity=self.multiplicity,
             title=self.title,

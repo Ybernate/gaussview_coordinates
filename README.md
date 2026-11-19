@@ -16,10 +16,14 @@ opens without complaint.
 | **3D engine** | Explicit hydrogens (`AddHs`), ETKDGv3 embedding, and MMFF94 / UFF minimization. `AUTO` picks MMFF94 for organics and UFF when metals or heavy elements appear. Open Babel is a fallback when RDKit cannot embed (common for coordination complexes). |
 | **Atom editor** | An editable table of `Index, Symbol, X, Y, Z`. Add atoms, delete atoms (e.g. strip a water), substitute elements (e.g. C → Si) keeping position, and optionally relax clashes with a force-field cleanup. |
 | **Charge / spin** | Charge and multiplicity are auto-suggested (closed-shell singlet by default; doublet for odd-electron radicals) and fully editable — essential for ions, radicals, and metal complexes. |
-| **Gaussian export** | Strict layout: Link 0 (`%chk / %mem / %nprocshared`) → route card → blank → title → blank → `charge multiplicity` → Cartesian block → **mandatory trailing blank line**. Route presets for opt, opt+freq, single-point, dispersion-corrected functionals, semi-empirical, and transition-metal jobs, plus an optional tail section for custom basis sets / ECPs. |
-| **Preview** | Interactive 3D view (py3Dmol / stmol) with stick, ball-and-stick, spacefill, and line styles. |
+| **Gaussian export** | Strict layout: Link 0 (`%chk / %mem / %nprocshared`) → route card → blank → title → blank → `charge multiplicity` → Cartesian block → **mandatory trailing blank line**. Route presets for opt, opt+freq, single-point, dispersion-corrected functionals, semi-empirical, transition-metal, and mixed-basis `genecp` jobs. |
+| **Mixed basis / ECP (genecp)** | For heavy metals (Pt, Au, Pd, Ru, …) that have no all-electron Pople basis, the app auto-builds the `genecp` tail: a regular basis (default 6-31G(d)) for light atoms and an ECP basis (default LANL2DZ) for the heavy ones, with the pseudopotential block. Heavy elements are detected automatically; bases are editable. |
+| **Freeze atoms (partial optimization)** | A **Freeze** checkbox per atom in the editor table writes the Gaussian `-1` freeze code (`C  -1  x  y  z`) so you can optimize an active site while holding the rest fixed. Frozen atoms are tinted in the 3D view. |
+| **Preview** | Interactive 3D view (py3Dmol / stmol) with stick, ball-and-stick, spacefill, and line styles, plus an optional **atom-index overlay** (`#:symbol`) so a table row maps unambiguously to an atom in 3D. |
 
 ## Install & run
+
+### Option A — local Python
 
 ```bash
 python3 -m venv .venv
@@ -30,6 +34,17 @@ streamlit run app.py
 ```
 
 Then open the URL Streamlit prints (default http://localhost:8501).
+
+### Option B — Docker (no local Python / RDKit needed)
+
+```bash
+docker build -t molgauss .
+docker run --rm -p 8501:8501 molgauss
+```
+
+Then open http://localhost:8501. The image is based on `python:3.11-slim` and
+installs RDKit and Open Babel from their manylinux wheels, so there is nothing
+to configure on the host.
 
 ## Project layout
 
@@ -45,6 +60,9 @@ molgauss/
 tests/
   test_engine.py       End-to-end engine smoke tests
 requirements.txt
+Dockerfile             Container image (python:3.11-slim + pip wheels)
+.dockerignore
+run.sh                 Local venv bootstrap + launcher
 ```
 
 ## Using the engine without the UI
@@ -77,6 +95,25 @@ m3d = from_xyz_block(open("water.xyz").read())
 editor.substitute_element(m3d, 0, "S")   # O -> S
 editor.add_atom(m3d, "Cl", 2.0, 0.0, 0.0)
 editor.delete_atom(m3d, 3)
+```
+
+Freeze atoms for a partial optimization (writes the `-1` code):
+
+```python
+from molgauss import editor, write_gjf, RouteConfig
+editor.set_frozen(m3d, 0, True)          # freeze atom 0
+editor.set_frozen(m3d, 1, True)          # freeze atom 1
+gjf = write_gjf(m3d)                      # freeze column appears automatically
+# -> "O  -1  x  y  z" for frozen atoms, "H   0  x  y  z" for the rest
+```
+
+Heavy metals with a mixed basis / ECP (`genecp`):
+
+```python
+from molgauss import build_genecp_tail, write_gjf, RouteConfig
+tail = build_genecp_tail(m3d, light_basis="6-31G(d)",
+                         heavy_basis="LANL2DZ", ecp="LANL2DZ")
+gjf = write_gjf(m3d, RouteConfig(route="# opt b3lyp/genecp", tail=tail))
 ```
 
 ## Tests

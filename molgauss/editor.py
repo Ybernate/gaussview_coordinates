@@ -63,6 +63,21 @@ def replace_atoms(mol: Molecule3D, atoms: List[Atom]) -> Molecule3D:
     return mol
 
 
+def set_frozen(mol: Molecule3D, index: int, frozen: bool = True) -> Molecule3D:
+    """Freeze (``-1`` in Gaussian) or unfreeze a single atom for optimization."""
+    if not 0 <= index < len(mol.atoms):
+        raise IndexError(f"Atom index {index} out of range (0..{len(mol.atoms)-1})")
+    mol.atoms[index].frozen = bool(frozen)
+    return mol
+
+
+def freeze_all(mol: Molecule3D, frozen: bool = True) -> Molecule3D:
+    """Freeze or unfreeze every atom."""
+    for a in mol.atoms:
+        a.frozen = bool(frozen)
+    return mol
+
+
 def cleanup_geometry(
     mol: Molecule3D, force_field: str = "AUTO", max_iters: int = 500
 ) -> Optional[str]:

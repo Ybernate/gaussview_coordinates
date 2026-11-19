@@ -24,7 +24,14 @@ from .inputs import (
     build_polymer,
 )
 from .geometry import embed_and_optimize, GeometryError
-from .gaussian import write_gjf, write_xyz, RouteConfig
+from .gaussian import (
+    write_gjf,
+    write_xyz,
+    RouteConfig,
+    build_genecp_tail,
+    ROUTE_PRESETS,
+    HEAVY_ELEMENTS_FOR_ECP,
+)
 from . import editor
 
 __all__ = [
@@ -43,6 +50,9 @@ __all__ = [
     "write_gjf",
     "write_xyz",
     "RouteConfig",
+    "build_genecp_tail",
+    "ROUTE_PRESETS",
+    "HEAVY_ELEMENTS_FOR_ECP",
     "editor",
 ]
 

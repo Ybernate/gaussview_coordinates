@@ -28,10 +28,12 @@ from molgauss import (
     write_gjf,
     write_xyz,
     RouteConfig,
+    build_genecp_tail,
+    ROUTE_PRESETS,
+    HEAVY_ELEMENTS_FOR_ECP,
     editor,
 )
 from molgauss.molmodel import Atom, Molecule3D, symbol_to_atomic_number
-from molgauss.gaussian import ROUTE_PRESETS
 
 # --------------------------------------------------------------------------- #
 # Page config
@@ -64,8 +66,18 @@ _init_state()
 # --------------------------------------------------------------------------- #
 # 3D viewer
 # --------------------------------------------------------------------------- #
-def render_3d(mol: Molecule3D, style: str = "stick") -> None:
-    """Render an interactive py3Dmol view from the molecule's XYZ block."""
+def render_3d(
+    mol: Molecule3D,
+    style: str = "stick",
+    show_indices: bool = False,
+    mark_frozen: bool = True,
+) -> None:
+    """Render an interactive py3Dmol view from the molecule's XYZ block.
+
+    ``show_indices`` draws each atom's table index on top of its sphere so the
+    user can match the 3D view to the CRUD table row by row. ``mark_frozen``
+    tints frozen atoms so a partial-optimization selection is visible in 3D.
+    """
     try:
         import py3Dmol
         from stmol import showmol
@@ -84,6 +96,34 @@ def render_3d(mol: Molecule3D, style: str = "stick") -> None:
         view.setStyle({"sphere": {"scale": 1.0}})
     else:  # line
         view.setStyle({"line": {}})
+
+    # Tint frozen atoms (partial optimization) so they stand out.
+    if mark_frozen and any(a.frozen for a in mol.atoms):
+        for i, a in enumerate(mol.atoms):
+            if a.frozen:
+                view.setStyle(
+                    {"serial": i},
+                    {"stick": {"radius": 0.12},
+                     "sphere": {"scale": 0.34, "color": "0x1f77b4"}},
+                )
+
+    # Draw the table index above each atom. The label text includes the symbol
+    # so "#14 (C)" is unambiguous when matching the editor table.
+    if show_indices:
+        for i, a in enumerate(mol.atoms):
+            frozen_tag = " ❄" if a.frozen else ""
+            view.addLabel(
+                f"{i}:{a.symbol}{frozen_tag}",
+                {
+                    "position": {"x": a.x, "y": a.y, "z": a.z},
+                    "backgroundColor": "0x111111",
+                    "backgroundOpacity": 0.65,
+                    "fontColor": "white",
+                    "fontSize": 11,
+                    "inFront": True,
+                },
+            )
+
     view.setBackgroundColor("0xf7f7f9")
     view.zoomTo()
     showmol(view, height=420, width=520)
@@ -297,9 +337,18 @@ left, right = st.columns([1, 1])
 
 with left:
     st.subheader("3D preview")
-    style = st.selectbox("Display style", ["stick", "ball-and-stick", "spacefill", "line"])
-    render_3d(mol, style=style)
+    pv1, pv2 = st.columns([2, 1])
+    style = pv1.selectbox("Display style", ["stick", "ball-and-stick", "spacefill", "line"])
+    show_idx = pv2.checkbox(
+        "Atom indices", value=False,
+        help="Overlay each atom's table index (and symbol) on the 3D view so "
+        "you can tell exactly which atom a table row refers to.",
+    )
+    render_3d(mol, style=style, show_indices=show_idx)
     show_summary(mol)
+    if any(a.frozen for a in mol.atoms):
+        n_frozen = sum(a.frozen for a in mol.atoms)
+        st.caption(f"❄ {n_frozen} atom(s) frozen for partial optimization (shown in blue).")
 
 with right:
     st.subheader("Charge & spin")
@@ -322,11 +371,13 @@ st.subheader("Atom editor")
 st.caption(
     "Edit coordinates or element symbols directly in the table. Add rows at the "
     "bottom, delete rows with the row menu, then click **Apply table edits**. "
-    "Substituting an element (e.g. C → Si) keeps the atom's position."
+    "Substituting an element (e.g. C → Si) keeps the atom's position. Tick "
+    "**Freeze** to hold an atom fixed during the Gaussian optimization "
+    "(written as a `-1` freeze code)."
 )
 
 df = pd.DataFrame(
-    [{"Index": i, "Symbol": a.symbol, "X": a.x, "Y": a.y, "Z": a.z}
+    [{"Index": i, "Symbol": a.symbol, "X": a.x, "Y": a.y, "Z": a.z, "Freeze": a.frozen}
      for i, a in enumerate(mol.atoms)]
 )
 
@@ -341,11 +392,14 @@ edited = st.data_editor(
         "X": st.column_config.NumberColumn("X (Å)", format="%.6f"),
         "Y": st.column_config.NumberColumn("Y (Å)", format="%.6f"),
         "Z": st.column_config.NumberColumn("Z (Å)", format="%.6f"),
+        "Freeze": st.column_config.CheckboxColumn(
+            "Freeze", help="Freeze this atom during optimization (Gaussian -1 code)."
+        ),
     },
     key="atom_table",
 )
 
-ec1, ec2, ec3 = st.columns([1, 1, 2])
+ec1, ec2, ec3, ec4 = st.columns([1.1, 1.1, 1, 2])
 if ec1.button("Apply table edits"):
     try:
         new_atoms = []
@@ -354,17 +408,28 @@ if ec1.button("Apply table edits"):
             if not sym or sym.lower() == "nan":
                 continue
             symbol_to_atomic_number(sym)  # validate
-            new_atoms.append(Atom(sym, row["X"] or 0.0, row["Y"] or 0.0, row["Z"] or 0.0))
+            frozen = bool(row.get("Freeze", False))
+            new_atoms.append(
+                Atom(sym, row["X"] or 0.0, row["Y"] or 0.0, row["Z"] or 0.0, frozen)
+            )
         if not new_atoms:
             st.error("The table has no valid atoms.")
         else:
             editor.replace_atoms(mol, new_atoms)
-            st.success(f"Applied edits — {len(new_atoms)} atoms.")
+            n_frozen = sum(a.frozen for a in new_atoms)
+            msg = f"Applied edits — {len(new_atoms)} atoms"
+            msg += f", {n_frozen} frozen." if n_frozen else "."
+            st.success(msg)
             st.rerun()
     except Exception as exc:
         st.error(f"Could not apply edits: {exc}")
 
-if ec2.button("Force-field cleanup"):
+if ec2.button("Freeze / free all"):
+    all_frozen = all(a.frozen for a in mol.atoms) and len(mol.atoms) > 0
+    editor.freeze_all(mol, not all_frozen)
+    st.rerun()
+
+if ec3.button("Force-field cleanup"):
     try:
         note = editor.cleanup_geometry(mol, force_field=FF)
         if note:
@@ -376,9 +441,10 @@ if ec2.button("Force-field cleanup"):
     except Exception as exc:
         st.error(f"Cleanup failed: {exc}")
 
-ec3.caption(
+ec4.caption(
     "Use **Force-field cleanup** after manual edits to relax atomic clashes "
-    "(rebuilds bonds from geometry and runs a short UFF/MMFF minimization)."
+    "(rebuilds bonds from geometry and runs a short UFF/MMFF minimization). "
+    "**Freeze / free all** toggles every atom at once."
 )
 
 # --------------------------------------------------------------------------- #
@@ -396,11 +462,45 @@ with gc1:
 with gc2:
     mem = st.text_input("%mem", value="4GB")
     nproc = st.number_input("%nprocshared", 1, 256, value=4, step=1)
-    tail = st.text_area(
-        "Extra tail section (optional: custom basis / ECP)", value="", height=80,
-        help="Appended after the coordinates, e.g. LANL2DZ ECP blocks for heavy atoms.",
-    )
     fmt = st.radio("File format", [".gjf", ".com"], horizontal=True)
+
+# --- genecp / mixed-basis helper (ECP for heavy metals) ---------------------
+heavy_present = sorted({a.symbol for a in mol.atoms} & HEAVY_ELEMENTS_FOR_ECP)
+is_genecp = "genecp" in route.lower() or "gen" == route.lower().split("/")[-1].strip()
+
+auto_tail = ""
+if is_genecp or heavy_present:
+    with st.expander(
+        "Mixed basis set / ECP (genecp) for heavy metals"
+        + (f" — detected: {', '.join(heavy_present)}" if heavy_present else ""),
+        expanded=is_genecp,
+    ):
+        st.caption(
+            "Heavy metals (Pt, Au, Pd, Ru, …) have no all-electron Pople basis "
+            "such as 6-31G(d), so they need an effective core potential. With a "
+            "`genecp` route this builds the basis/ECP tail automatically: a "
+            "regular basis for light atoms and an ECP basis for the heavy ones."
+        )
+        bc1, bc2, bc3 = st.columns(3)
+        light_basis = bc1.text_input("Light-atom basis", value="6-31G(d)")
+        heavy_basis = bc2.text_input("Heavy-atom basis", value="LANL2DZ")
+        ecp_name = bc3.text_input("ECP (pseudopotential)", value="LANL2DZ")
+        if heavy_present:
+            auto_tail = build_genecp_tail(
+                mol, light_basis=light_basis, heavy_basis=heavy_basis, ecp=ecp_name
+            )
+            st.markdown("**Auto-generated genecp tail**")
+            st.code(auto_tail or "(no heavy atoms detected)", language="text")
+        else:
+            st.info("No heavy (ECP) elements detected in the current molecule.")
+
+tail = st.text_area(
+    "Tail section (custom basis / ECP, appended after coordinates)",
+    value=auto_tail,
+    height=140 if auto_tail else 80,
+    help="Auto-filled for genecp routes with heavy atoms; edit freely. Leave "
+    "empty for standard single-basis jobs.",
+)
 
 cfg = RouteConfig(route=route, chk=chk, mem=mem, nprocshared=int(nproc), tail=tail)
 mol.title = title

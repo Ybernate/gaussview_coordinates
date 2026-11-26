@@ -37,37 +37,118 @@ ROUTE_PRESETS = {
 }
 
 # ---------------------------------------------------------------------------
-# Export MODES: curated route sections that add the keywords which keep the SCF
-# stable and the optimizer from stalling, so Gaussian spends fewer cycles.
+# Route-section builder (P1-2). Instead of baking fixed keyword strings, the
+# route is assembled from explicit options so the grid can be version-aware and
+# optional keywords stay optional.
 #
-#   int=ultrafine         finer DFT integration grid (smooth PES, fewer failed
-#                         steps on flat surfaces).
-#   scf=xqc               quadratic-convergence SCF fallback (recovers from SCF
-#                         oscillation instead of crashing).
-#   empiricaldispersion=gd3  Grimme D3 dispersion (correct van der Waals, vital
-#                         for polymers, peptides and stacked systems).
+# Verified against official Gaussian documentation:
+#   * UltraFine is the DEFAULT DFT grid in Gaussian 16, so `int=ultrafine` is
+#     REDUNDANT for G16 and is only added for G09 (default FineGrid there).
+#     https://gaussian.com/integral/  and  https://gaussian.com/dft/
+#   * `scf=xqc` (quadratic-convergence SCF) is an optional robustness aid, not a
+#     default. https://gaussian.com/scf/
+#   * `empiricaldispersion=gd3` adds Grimme D3 dispersion.
+#     https://gaussian.com/dft/  (functional/keyword reference)
+# (Documentation content rephrased for licensing compliance.)
 # ---------------------------------------------------------------------------
+
+
+def build_route(
+    method: str = "b3lyp",
+    basis: str = "6-31g(d)",
+    job: str = "opt",                 # "opt", "sp", "opt freq", "freq"
+    gaussian_version: str = "G16",    # "G16" or "G09"
+    dispersion: Optional[str] = "gd3",
+    use_xqc: bool = False,
+    opt_options: Optional[List[str]] = None,
+    extra: Optional[List[str]] = None,
+) -> str:
+    """Assemble a Gaussian route section.
+
+    The integration grid is handled by version: for G09 ``int=ultrafine`` is
+    appended (its default is the coarser FineGrid); for G16 it is omitted
+    because UltraFine is already the default (adding it is redundant).
+    """
+    tokens: List[str] = ["#"]
+
+    # Job keyword(s).
+    job = (job or "opt").strip().lower()
+    if opt_options and ("opt" in job):
+        opt_tok = "opt=(" + ",".join(opt_options) + ")"
+        job = job.replace("opt", opt_tok, 1)
+    if job and job != "sp":
+        tokens.append(job)
+
+    # Method/basis.
+    tokens.append(f"{method}/{basis}")
+
+    if dispersion:
+        tokens.append(f"empiricaldispersion={dispersion}")
+
+    # Version-aware grid (only add when it is NOT already the default).
+    if gaussian_version.upper() == "G09":
+        tokens.append("int=ultrafine")
+
+    if use_xqc:
+        tokens.append("scf=xqc")
+
+    for e in (extra or []):
+        e = e.strip()
+        if e:
+            tokens.append(e)
+
+    return " ".join(tokens)
+
+
+# Export MODES expressed as build_route(**kwargs) so the actual route is
+# generated (version-aware) rather than hardcoded. `route` is a *fallback*
+# literal for callers that do not pass a version.
 EXPORT_MODES = {
     "standard": {
         "label": "Mode 1 — Enhanced standard DFT opt (recommended)",
-        "route": "# opt b3lyp/6-31g(d) empiricaldispersion=gd3 int=ultrafine scf=xqc",
-        "description": "B3LYP/6-31G(d) with D3 dispersion, ultrafine grid and "
-        "XQC SCF. Good default for medium molecules and polymers.",
+        "kwargs": dict(method="b3lyp", basis="6-31g(d)", job="opt",
+                       dispersion="gd3", use_xqc=False),
+        "description": "B3LYP/6-31G(d) with D3 dispersion. UltraFine grid is the "
+        "G16 default (added automatically for G09). SCF=XQC off by default.",
     },
     "robust": {
-        "label": "Mode 2 — Robust opt+freq for tough SCF / larger systems",
-        "route": "# opt=(maxcycles=200,calcfc) freq b3lyp/6-31g(d) "
-        "empiricaldispersion=gd3 int=ultrafine scf=(xqc,maxcycle=300)",
-        "description": "Adds opt+freq, initial force constants (calcfc), extra "
-        "optimizer/SCF cycles. For flexible or hard-to-converge systems.",
+        "label": "Mode 2 — Robust opt+freq (one job) for tough cases",
+        "kwargs": dict(method="b3lyp", basis="6-31g(d)", job="opt freq",
+                       dispersion="gd3", use_xqc=True,
+                       opt_options=["maxcycles=200", "calcfc"]),
+        "description": "opt+freq in a single job with initial force constants "
+        "(calcfc), extra optimizer cycles, and SCF=XQC for hard SCF cases.",
     },
     "quick": {
         "label": "Mode 3 — Fast pre-screen (semi-empirical PM6)",
-        "route": "# opt pm6",
-        "description": "Semi-empirical PM6 optimization. Very fast rough clean-up "
-        "or sanity check before a DFT run.",
+        "kwargs": dict(method="pm6", basis="", job="opt",
+                       dispersion=None, use_xqc=False),
+        "description": "Semi-empirical PM6 optimization. Fast rough clean-up or "
+        "sanity check before a DFT run.",
     },
 }
+
+
+def mode_route(mode: str, gaussian_version: str = "G16") -> str:
+    """Return the route for an export mode, built version-aware."""
+    try:
+        kw = dict(EXPORT_MODES[mode]["kwargs"])
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown export mode {mode!r}; use one of {list(EXPORT_MODES)}"
+        ) from exc
+    kw["gaussian_version"] = gaussian_version
+    # PM6 has no basis; build_route joins method/basis, so handle empty basis.
+    if not kw.get("basis"):
+        method = kw.pop("method")
+        kw.pop("basis", None)
+        route = build_route(method=method, basis="", job=kw.get("job", "opt"),
+                            gaussian_version=gaussian_version,
+                            dispersion=kw.get("dispersion"),
+                            use_xqc=kw.get("use_xqc", False),
+                            opt_options=kw.get("opt_options"))
+        return route.replace(f"{method}/ ", f"{method} ").replace(f"{method}/", method)
+    return build_route(**kw)
 
 # Elements that genecp treats as "heavy": they need an effective core potential
 # (ECP) because all-electron Pople bases such as 6-31G(d) are not defined for
@@ -106,29 +187,48 @@ class RouteConfig:
         return r
 
 
-def suggest_resources(n_atoms: int) -> Tuple[str, int]:
-    """Pick (%mem, %nprocshared) scaled to system size.
+def suggest_resources(
+    n_atoms: int,
+    physical_cores: Optional[int] = None,
+    ram_gb: Optional[float] = None,
+) -> Tuple[str, int]:
+    """Pick (%mem, %nprocshared) from the user's hardware, not just atom count.
 
-    A rough, conservative heuristic so small jobs don't over-request and large
-    ones aren't starved. Users can always override in the UI.
+    ``%nprocshared`` should reflect PHYSICAL cores (Gaussian's shared-memory
+    parallelism does not benefit from SMT/hyperthreads), and ``%mem`` should
+    stay below physical RAM to avoid swapping. When the hardware is given:
+
+      * nproc = min(physical_cores, a size-based cap) so tiny jobs don't grab
+        every core while large jobs can use them.
+      * mem = leave headroom (~20% or >=2 GB) below total RAM for the OS and
+        Gaussian's non-%mem allocations.
+
+    When hardware is not provided, falls back to a conservative size-based guess
+    (and this is clearly a guess, not a measurement of the user's machine).
     """
+    # Size-based cap on useful parallelism for a given system.
     if n_atoms <= 20:
-        return "4GB", 4
-    if n_atoms <= 60:
-        return "8GB", 8
-    if n_atoms <= 150:
-        return "16GB", 16
-    return "32GB", 24
+        size_cap, size_mem = 4, 4
+    elif n_atoms <= 60:
+        size_cap, size_mem = 8, 8
+    elif n_atoms <= 150:
+        size_cap, size_mem = 16, 16
+    else:
+        size_cap, size_mem = 24, 32
 
+    if physical_cores:
+        nproc = max(1, min(int(physical_cores), size_cap))
+    else:
+        nproc = size_cap
 
-def mode_route(mode: str) -> str:
-    """Return the curated route section for an export mode key."""
-    try:
-        return EXPORT_MODES[mode]["route"]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unknown export mode {mode!r}; use one of {list(EXPORT_MODES)}"
-        ) from exc
+    if ram_gb:
+        headroom = max(2.0, 0.2 * float(ram_gb))
+        usable = max(1, int(float(ram_gb) - headroom))
+        mem_gb = min(size_mem, usable)
+    else:
+        mem_gb = size_mem
+
+    return f"{mem_gb}GB", nproc
 
 
 def _format_atom_line(

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "molgauss"
+version = "1.0.0"
+description = "Generate, edit and export force-field pre-optimized 3D molecular structures ready for GaussView / Gaussian."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+keywords = [
+    "chemistry", "computational-chemistry", "cheminformatics", "rdkit",
+    "gaussian", "gaussview", "gjf", "3d-structure", "conformer", "xtb",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Intended Audience :: Science/Research",
+]
+
+# Base dependencies. These power the engine AND the Streamlit UI. `ase` is a
+# BASE dependency (not an xtb extra) because the CIF reader (from_cif) uses it;
+# the GFN2-xTB backend adds only `tblite` on top, as the [xtb] extra below.
+# Versions are the ones verified on Python 3.11 (see requirements.txt).
+dependencies = [
+    "rdkit==2026.9.2",
+    "openbabel-wheel==3.1.1.23",
+    "pubchempy==1.0.5",
+    "py3Dmol==2.5.5",
+    "stmol==0.0.9",
+    "streamlit==1.67.0",
+    "biopython==1.88",
+    "pandas==3.1.1",
+    "ase==3.29.0",
+    "numpy==2.4.6",
+]
+
+[project.optional-dependencies]
+# GFN2-xTB conformer ranking/optimization. Optional: without it the conformer
+# search degrades gracefully to MMFF energy ranking (molgauss.energy.xtb_available
+# returns False and callers fall back). Install with: pip install molgauss[xtb]
+xtb = [
+    "tblite==0.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Ybernate/gaussview_coordinates"
+Repository = "https://github.com/Ybernate/gaussview_coordinates"
+
+# Run the Streamlit UI after install with:  streamlit run app.py
+# (app.py is the UI entry point and lives at the repo root, not inside the
+# importable package, so it is launched with streamlit rather than a console
+# script.)
+
+[tool.setuptools]
+# Ship only the importable package; app.py and tests/ stay in the repo but are
+# not part of the installed distribution.
+packages = ["molgauss"]

@@ -10,6 +10,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# Packaging build artifacts (python -m build)
+build/
+dist/
+
 # Streamlit
 .streamlit/secrets.toml
 

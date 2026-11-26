@@ -87,12 +87,66 @@ def from_name(name: str, timeout: int = 20) -> Tuple[Chem.Mol, str]:
 
 
 # -------------------------------------------------------------------- polymer
-def build_polymer(monomer_smiles: str, n_units: int, cap: str = "H") -> Chem.Mol:
+# End-group presets. Each value is a SMILES fragment with a single attachment
+# point [*]; the dummy is replaced by bonding the fragment's attachment atom to
+# the chain. "H" is the trivial cap (a plain hydrogen).
+END_GROUP_PRESETS = {
+    "H": "[*]",  # bare attachment -> dummy becomes a hydrogen (see _attach_fragment)
+    "OH": "[*]O",
+    "OCH3": "[*]OC",
+    "CH3": "[*]C",
+    "F": "[*]F",
+    "Cl": "[*]Cl",
+    "NH2": "[*]N",
+    "COOH": "[*]C(=O)O",
+    "vinyl (=CH2)": "[*]=C",
+}
+
+
+def _resolve_cap(cap: str) -> str:
+    """Return a cap SMILES fragment for a preset key, an element symbol, or a
+    raw [*]-marked SMILES fragment."""
+    cap = (cap or "H").strip()
+    if cap in END_GROUP_PRESETS:
+        return END_GROUP_PRESETS[cap]
+    if "[*]" in cap or "*" in cap:
+        return cap if "[*]" in cap else cap.replace("*", "[*]")
+    # Treat as a bare element symbol (validated downstream).
+    try:
+        symbol_to_atomic_number(cap)
+        return f"[*][{cap}]" if len(cap) > 1 else f"[*]{cap}"
+    except Exception as exc:
+        raise InputError(
+            f"Unknown end group {cap!r}. Use a preset ({', '.join(END_GROUP_PRESETS)}), "
+            f"an element symbol, or a [*]-marked SMILES fragment."
+        ) from exc
+
+
+def build_polymer(
+    monomer_smiles: str,
+    n_units: int,
+    cap: str = "H",
+    cap_left: str | None = None,
+    cap_right: str | None = None,
+) -> Chem.Mol:
     """Construct a linear polymer from a monomer with two attachment points.
 
     The monomer SMILES must mark its two connection points with ``[*]`` (dummy
     atoms), e.g. polyethylene is ``[*]CC[*]``. ``n_units`` copies are joined
-    head-to-tail and the dangling ends are capped (default: hydrogen).
+    head-to-tail, then each dangling end is capped independently.
+
+    Parameters
+    ----------
+    cap :
+        Fallback end group for both ends (preset key such as ``"H"`` / ``"OH"``
+        / ``"OCH3"`` / ``"CH3"``, an element symbol, or a ``[*]``-marked SMILES
+        fragment). Kept for backward compatibility.
+    cap_left, cap_right :
+        Per-end groups. When given they override ``cap`` for that end. This is
+        required for asymmetric repeat units: e.g. PEG ``[*]OCC[*]`` with both
+        ends ``OH`` must become HO-(CH2CH2O)n-H, i.e. an OH on the left O-end
+        and an H on the C-end is wrong -- both-OH means the free valences are
+        both hydroxyl-terminated, giving the correct C(2n)H(4n+2)O(n+1) formula.
     """
     monomer_smiles = (monomer_smiles or "").strip()
     if n_units < 1:
@@ -109,15 +163,15 @@ def build_polymer(monomer_smiles: str, n_units: int, cap: str = "H") -> Chem.Mol
             f"Found {len(dummies)}. Example: [*]CC[*] for polyethylene."
         )
 
-    # Build the chain by repeatedly joining copies with RDKit's RWMol, bonding
-    # the second dummy's neighbor of one unit to the first dummy's neighbor of
-    # the next, then stripping the consumed dummy atoms.
+    left_cap = _resolve_cap(cap_left if cap_left is not None else cap)
+    right_cap = _resolve_cap(cap_right if cap_right is not None else cap)
+
+    # Build the chain by repeatedly joining copies.
     chain = Chem.RWMol(Chem.MolFromSmiles(monomer_smiles))
     for _ in range(n_units - 1):
         chain = _join_unit(chain, monomer_smiles)
 
-    # Replace remaining dummy atoms with the cap element.
-    capped = _cap_dummies(chain, cap)
+    capped = _cap_ends(chain, left_cap, right_cap)
     Chem.SanitizeMol(capped)
     return capped
 
@@ -157,12 +211,77 @@ def _join_unit(chain: Chem.RWMol, monomer_smiles: str) -> Chem.RWMol:
     return combined
 
 
-def _cap_dummies(mol: Chem.RWMol, cap: str) -> Chem.Mol:
-    cap_z = symbol_to_atomic_number(cap)
+def _attach_fragment(rw: Chem.RWMol, dummy_idx: int, frag_smiles: str) -> Chem.RWMol:
+    """Replace one dummy atom with a cap fragment.
+
+    Special-cases ``[*][H]`` (plain hydrogen cap): just turn the dummy into a
+    hydrogen, which Chem.AddHs/sanitize handle cleanly. For multi-atom
+    fragments, combine the chain with the fragment, bond the dummy's heavy
+    neighbour to the fragment's attachment-neighbour, then delete both the
+    dummy and the fragment's own dummy.
+    """
+    # Hydrogen cap: a bare "[*]" (or "[*][H]") means terminate with hydrogen.
+    # Turn the dummy into a hydrogen and clear any no-implicit-H flag so
+    # sanitize/AddHs treat the neighbour normally.
+    if frag_smiles.strip() in ("[*]", "[*][H]", "*"):
+        at = rw.GetAtomWithIdx(dummy_idx)
+        at.SetAtomicNum(1)
+        at.SetNoImplicit(False)
+        return rw
+
+    frag = Chem.MolFromSmiles(frag_smiles)
+    if frag is None:
+        raise InputError(f"Could not parse end-group fragment: {frag_smiles!r}")
+
+    # Neighbour of the chain dummy (the heavy atom the cap must bond to).
+    dummy_atom = rw.GetAtomWithIdx(dummy_idx)
+    nbrs = [n.GetIdx() for n in dummy_atom.GetNeighbors()]
+    if not nbrs:
+        raise InputError("Dangling attachment point has no neighbour to cap")
+    chain_attach = nbrs[0]
+
+    n_chain = rw.GetNumAtoms()
+    combined = Chem.RWMol(Chem.CombineMols(rw.GetMol(), frag))
+    # Fragment atoms are offset by n_chain. Find the fragment's dummy + its nbr.
+    frag_dummy = None
+    frag_attach = None
+    for a in combined.GetAtoms():
+        if a.GetIdx() >= n_chain and a.GetAtomicNum() == 0:
+            frag_dummy = a.GetIdx()
+            fn = [x.GetIdx() for x in a.GetNeighbors()]
+            frag_attach = fn[0] if fn else None
+            break
+    if frag_dummy is None or frag_attach is None:
+        raise InputError(f"End-group fragment lacks an attachment point: {frag_smiles!r}")
+
+    combined.AddBond(chain_attach, frag_attach, Chem.BondType.SINGLE)
+    for d in sorted([dummy_idx, frag_dummy], reverse=True):
+        combined.RemoveAtom(d)
+    return combined
+
+
+def _cap_ends(mol: Chem.RWMol, left_cap: str, right_cap: str) -> Chem.Mol:
+    """Cap the two surviving dummies with independent fragments.
+
+    The left end is the lowest-indexed dummy (leading dummy of the first unit,
+    never consumed during joining); the right end is the other.
+    """
     rw = Chem.RWMol(mol)
-    dummies = [a.GetIdx() for a in rw.GetAtoms() if a.GetAtomicNum() == 0]
-    for idx in dummies:
-        rw.GetAtomWithIdx(idx).SetAtomicNum(cap_z)
+    dummies = sorted(a.GetIdx() for a in rw.GetAtoms() if a.GetAtomicNum() == 0)
+    if len(dummies) != 2:
+        # Fall back: cap whatever dummies remain with the left fragment.
+        for idx in sorted(dummies, reverse=True):
+            rw = _attach_fragment(rw, idx, left_cap)
+        return rw.GetMol()
+
+    left_idx, right_idx = dummies[0], dummies[1]
+    # Cap the higher index first so the lower index stays valid afterwards.
+    rw = _attach_fragment(rw, right_idx, right_cap)
+    # Right-cap may have shifted indices (removed 2 atoms, both > left_idx for a
+    # multi-atom cap, or 0 for the H cap). Re-locate the left dummy by scanning.
+    remaining = [a.GetIdx() for a in rw.GetAtoms() if a.GetAtomicNum() == 0]
+    if remaining:
+        rw = _attach_fragment(rw, remaining[0], left_cap)
     return rw.GetMol()
 
 

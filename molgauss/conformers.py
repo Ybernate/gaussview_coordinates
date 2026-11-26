@@ -30,9 +30,49 @@ SS_TARGETS = {
 }
 
 # Repeating torsion patterns for generic polymer backbones (degrees).
+#
+# These are applied by INDEX along the backbone (k % len). That is convenient
+# but chemically blind: on a PEG backbone whose bond types repeat with period 3
+# (O-C, C-C, C-O), an index-based period-4 pattern lands gauche values on the
+# wrong bonds and alternates signs arbitrarily (finding H2). They are kept only
+# for backward compatibility and are NOT used by the type-aware generator below.
 CHAIN_PATTERNS = {
     "all-trans": [180.0],
-    "tgt": [180.0, 60.0, 180.0, -60.0],  # trans-gauche, PEG-like helix
+    "tgt": [180.0, 60.0, 180.0, -60.0],  # legacy, index-based (see note)
+}
+
+# Type-aware candidate families. Each returns a function (elem_b, elem_c, k) ->
+# angle in degrees, where (elem_b, elem_c) are the two central-bond elements of
+# a backbone torsion and k is its position along the backbone. Angles are
+# assigned by BOND TYPE, not by raw index, so the same chemical bond always gets
+# the same treatment. The energy search (geometry.search_conformers) decides
+# which family wins; nothing here assumes a best one.
+def _fam_all_trans(eb, ec, k):
+    return 180.0
+
+
+def _fam_gauche_one_sign(eb, ec, k):
+    # Heteroatom-containing backbone bonds (C-O, C-N, C-S) go gauche (+60);
+    # all-carbon bonds stay trans. Same sign everywhere -> a regular helix.
+    hetero = {"O", "N", "S"}
+    if eb in hetero or ec in hetero:
+        return 60.0
+    return 180.0
+
+
+def _fam_gauche_alternating(eb, ec, k):
+    # Same as above but the gauche sign alternates between successive heteroatom
+    # bonds, which can relieve dipole stacking in poly-ethers.
+    hetero = {"O", "N", "S"}
+    if eb in hetero or ec in hetero:
+        return 60.0 if (k % 2 == 0) else -60.0
+    return 180.0
+
+
+CHAIN_FAMILIES = {
+    "all-trans": _fam_all_trans,
+    "gauche-1sign": _fam_gauche_one_sign,
+    "gauche-alt": _fam_gauche_alternating,
 }
 
 
@@ -68,13 +108,71 @@ def _backbone_dihedral_quads(chain: Sequence[int]) -> List[Tuple[int, int, int, 
     return quads
 
 
+def set_chain_conformation(mol: Chem.Mol, family: str = "all-trans", conf_id: int = -1):
+    """Set backbone dihedrals using a TYPE-AWARE family (preferred over index).
+
+    ``family`` is a key of ``CHAIN_FAMILIES``. Each backbone torsion's target is
+    chosen from the two elements of its central bond, so the same chemical bond
+    always gets the same angle (fixing H2). Returns a list of
+    ``(i, j, k, l, elem_j, elem_k, target_deg)`` describing what was set, which
+    the caller can compare against the post-minimization torsions to report
+    drift (P0-3).
+    """
+    if mol.GetNumConformers() == 0:
+        raise ValueError("Molecule has no conformer; embed it before setting torsions")
+    fam = CHAIN_FAMILIES.get(family)
+    if fam is None:
+        raise ValueError(f"Unknown chain family {family!r}; use {list(CHAIN_FAMILIES)}")
+
+    chain = _longest_heavy_chain(mol)
+    if len(chain) < 4:
+        return []
+    conf = mol.GetConformer(conf_id)
+    quads = _backbone_dihedral_quads(chain)
+    applied = []
+    k_rot = 0
+    for (a, b, c, d) in quads:
+        bond = mol.GetBondBetweenAtoms(b, c)
+        if bond is None or bond.GetBondType() != Chem.BondType.SINGLE or bond.IsInRing():
+            continue
+        eb = mol.GetAtomWithIdx(b).GetSymbol()
+        ec = mol.GetAtomWithIdx(c).GetSymbol()
+        target = fam(eb, ec, k_rot)
+        try:
+            rdMolTransforms.SetDihedralDeg(conf, a, b, c, d, target)
+            applied.append((a, b, c, d, eb, ec, target))
+            k_rot += 1
+        except Exception:
+            continue
+    return applied
+
+
+def measure_backbone_torsions(mol: Chem.Mol, conf_id: int = -1):
+    """Return the current backbone torsions as
+    ``(i, j, k, l, elem_j, elem_k, angle_deg)`` for drift reporting (P0-3)."""
+    if mol.GetNumConformers() == 0:
+        return []
+    chain = _longest_heavy_chain(mol)
+    conf = mol.GetConformer(conf_id)
+    out = []
+    for (a, b, c, d) in _backbone_dihedral_quads(chain):
+        bond = mol.GetBondBetweenAtoms(b, c)
+        if bond is None or bond.GetBondType() != Chem.BondType.SINGLE or bond.IsInRing():
+            continue
+        ang = rdMolTransforms.GetDihedralDeg(conf, a, b, c, d)
+        out.append((a, b, c, d, mol.GetAtomWithIdx(b).GetSymbol(),
+                    mol.GetAtomWithIdx(c).GetSymbol(), float(ang)))
+    return out
+
+
 def set_chain_extended(
     mol: Chem.Mol, pattern: str = "all-trans", conf_id: int = -1
 ) -> int:
-    """Set a linear molecule's backbone dihedrals to a regular pattern.
+    """Legacy index-based backbone pattern setter (kept for compatibility).
 
-    ``pattern`` is a key of ``CHAIN_PATTERNS`` (``all-trans`` or ``tgt``).
-    Returns the number of dihedrals rewritten. Requires an existing conformer.
+    ``pattern`` is a key of ``CHAIN_PATTERNS``. New code should prefer
+    ``set_chain_conformation`` (type-aware). Returns the number of dihedrals
+    rewritten. Requires an existing conformer.
     """
     if mol.GetNumConformers() == 0:
         raise ValueError("Molecule has no conformer; embed it before setting torsions")

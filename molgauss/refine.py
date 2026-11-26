@@ -155,8 +155,17 @@ def align_principal_axes(mol: Molecule3D) -> float:
     """Translate COM to the origin and rotate the longest axis onto X.
 
     Uses PCA (SVD of mass-weighted, centred coordinates). The principal axis
-    with the largest spatial extent becomes +X, the next +Y, the last +Z. A
-    deterministic sign convention is applied so repeated runs are reproducible.
+    with the largest spatial extent becomes X, the next Y, the last Z.
+
+    The net linear transform is assembled explicitly as a single matrix
+    ``R = S @ P @ V`` (principal-axis rotation ``V``, axis permutation ``P``,
+    per-axis sign flips ``S``) and constrained to be a PROPER rotation
+    (``det(R) = +1``). A naive independent sign flip per axis can yield a
+    reflection (``det = -1``), which mirror-inverts the geometry and silently
+    swaps the enantiomer of a chiral molecule. If the assembled transform is
+    improper, the sign of the least-significant axis (Z) is flipped to restore
+    ``det = +1`` while preserving the long-axis-on-X convention.
+
     Returns the extent (span) along the resulting X axis.
     """
     if len(mol.atoms) < 2:
@@ -166,26 +175,38 @@ def align_principal_axes(mol: Molecule3D) -> float:
     com = (xyz * masses[:, None]).sum(axis=0) / masses.sum()
     centred = xyz - com
 
-    # Mass-weighted covariance -> principal directions.
+    # Mass-weighted covariance -> principal directions (rows of V).
     cov = (centred * masses[:, None]).T @ centred
     _, _, vt = np.linalg.svd(cov)
-    rot = vt  # rows are principal axes, largest-variance first
+    V = vt  # each row is a principal axis, largest-variance first
 
-    rotated = centred @ rot.T
-
-    # Order axes by spatial span (max-min) so the physically longest axis is X.
-    spans = rotated.max(axis=0) - rotated.min(axis=0)
+    # Spatial span along each principal axis, to order longest -> X.
+    projected = centred @ V.T
+    spans = projected.max(axis=0) - projected.min(axis=0)
     order = np.argsort(spans)[::-1]
-    rotated = rotated[:, order]
+    P = np.eye(3)[order]  # permutation matrix
 
-    # Deterministic sign: make the first atom's largest-magnitude component
-    # along each axis positive (removes the SVD sign ambiguity).
+    # Deterministic sign convention: along each (ordered) axis, make the atom
+    # of largest magnitude positive. Removes the SVD sign ambiguity so repeated
+    # runs are reproducible.
+    ordered = projected[:, order]
+    signs = np.ones(3)
     for k in range(3):
-        col = rotated[:, k]
-        extreme = col[np.argmax(np.abs(col))]
-        if extreme < 0:
-            rotated[:, k] *= -1.0
+        col = ordered[:, k]
+        if col[np.argmax(np.abs(col))] < 0:
+            signs[k] = -1.0
+    S = np.diag(signs)
 
+    # Net transform and determinant check.
+    R = S @ P @ V
+    if np.linalg.det(R) < 0:
+        # Improper (reflection). Flip the least-significant axis (Z, index 2)
+        # so handedness is preserved and the X/Y long-axis convention stays.
+        signs[2] *= -1.0
+        S = np.diag(signs)
+        R = S @ P @ V
+
+    rotated = centred @ R.T
     for a, pos in zip(mol.atoms, rotated):
         a.x, a.y, a.z = float(pos[0]), float(pos[1]), float(pos[2])
     return float(rotated[:, 0].max() - rotated[:, 0].min())

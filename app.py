@@ -259,12 +259,12 @@ elif input_mode == "Polymer (monomer + n)":
     cap = st.sidebar.text_input("End-cap element", value="H")
     poly_conf = st.sidebar.selectbox(
         "Backbone conformation",
-        ["all-trans (extended)", "tgt (trans-gauche helix, PEG-like)", "random coil"],
+        ["all-trans (extended)", "tgt (trans-gauche helix)", "random coil"],
         help="Extended / regular backbones are far better DFT starting points "
         "than random coils and converge faster in Gaussian.",
     )
     conf_key = {"all-trans (extended)": "all-trans",
-                "tgt (trans-gauche helix, PEG-like)": "tgt",
+                "tgt (trans-gauche helix)": "tgt",
                 "random coil": None}[poly_conf]
     name = st.sidebar.text_input("Polymer name", value="polymer")
     if st.sidebar.button("Build polymer & generate 3D", type="primary"):

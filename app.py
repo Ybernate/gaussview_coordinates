@@ -23,13 +23,18 @@ from molgauss import (
     from_fasta,
     from_pdb_block,
     from_xyz_block,
+    xyz_perceive_bonds,
+    from_cif,
     build_polymer,
     embed_and_optimize,
     write_gjf,
     write_xyz,
     RouteConfig,
     build_genecp_tail,
+    suggest_resources,
+    mode_route,
     ROUTE_PRESETS,
+    EXPORT_MODES,
     HEAVY_ELEMENTS_FOR_ECP,
     editor,
 )
@@ -168,6 +173,13 @@ ff_choice = st.sidebar.selectbox(
 )
 FF = {"AUTO (MMFF94, UFF for metals)": "AUTO", "MMFF94": "MMFF94", "UFF": "UFF"}[ff_choice]
 
+align_axes = st.sidebar.checkbox(
+    "Align to principal axes (PCA)", value=True,
+    help="Centre the molecule at the origin and put its longest axis on X. "
+    "Gives GaussView a tidy orientation and helps Gaussian detect point-group "
+    "symmetry, which speeds up the calculation.",
+)
+
 charge_override = st.sidebar.number_input(
     "Charge (override)", value=0, step=1,
     help="Set the total molecular charge. Leave at the auto value for neutral "
@@ -203,7 +215,9 @@ if input_mode == "SMILES":
     if st.sidebar.button("Generate 3D", type="primary"):
         try:
             mol = from_smiles(smiles)
-            m3d, info = embed_and_optimize(mol, force_field=FF, name=name, title=name)
+            m3d, info = embed_and_optimize(
+                mol, force_field=FF, name=name, title=name, align=align_axes
+            )
             _finalize(m3d, info, f"SMILES: {smiles}")
         except Exception as exc:
             _handle_error(exc)
@@ -214,7 +228,9 @@ elif input_mode == "InChI":
     if st.sidebar.button("Generate 3D", type="primary"):
         try:
             mol = from_inchi(inchi)
-            m3d, info = embed_and_optimize(mol, force_field=FF, name=name, title=name)
+            m3d, info = embed_and_optimize(
+                mol, force_field=FF, name=name, title=name, align=align_axes
+            )
             _finalize(m3d, info, "InChI input")
         except Exception as exc:
             _handle_error(exc)
@@ -226,7 +242,9 @@ elif input_mode == "Name / IUPAC (PubChem)":
         try:
             with st.spinner("Querying PubChem…"):
                 mol, resolved = from_name(cname)
-            m3d, info = embed_and_optimize(mol, force_field=FF, name=cname, title=cname)
+            m3d, info = embed_and_optimize(
+                mol, force_field=FF, name=cname, title=cname, align=align_axes
+            )
             _finalize(m3d, info, f"PubChem name → SMILES: {resolved}")
         except Exception as exc:
             _handle_error(exc)
@@ -239,13 +257,25 @@ elif input_mode == "Polymer (monomer + n)":
     )
     n_units = st.sidebar.number_input("Degree of polymerization (n)", 1, 200, value=5, step=1)
     cap = st.sidebar.text_input("End-cap element", value="H")
+    poly_conf = st.sidebar.selectbox(
+        "Backbone conformation",
+        ["all-trans (extended)", "tgt (trans-gauche helix, PEG-like)", "random coil"],
+        help="Extended / regular backbones are far better DFT starting points "
+        "than random coils and converge faster in Gaussian.",
+    )
+    conf_key = {"all-trans (extended)": "all-trans",
+                "tgt (trans-gauche helix, PEG-like)": "tgt",
+                "random coil": None}[poly_conf]
     name = st.sidebar.text_input("Polymer name", value="polymer")
     if st.sidebar.button("Build polymer & generate 3D", type="primary"):
         try:
             with st.spinner(f"Building chain of {n_units} units…"):
                 mol = build_polymer(monomer, int(n_units), cap=cap)
-                m3d, info = embed_and_optimize(mol, force_field=FF, name=name, title=name)
-            _finalize(m3d, info, f"Polymer {monomer} × {n_units}")
+                m3d, info = embed_and_optimize(
+                    mol, force_field=FF, name=name, title=name,
+                    conformation=conf_key, align=align_axes,
+                )
+            _finalize(m3d, info, f"Polymer {monomer} × {n_units} ({poly_conf})")
         except Exception as exc:
             _handle_error(exc)
 
@@ -254,13 +284,24 @@ elif input_mode == "Peptide (FASTA)":
         "Amino-acid sequence (one-letter)", value="ACDEFG", height=100,
         help="Standard 20 residues (ACDEFGHIKLMNPQRSTVWY). Header lines with > are ignored.",
     )
+    pep_conf = st.sidebar.selectbox(
+        "Initial secondary structure",
+        ["extended (β strand)", "alpha helix", "polyproline-II", "random coil"],
+        help="β-strand (φ≈-135, ψ≈135) or α-helix (φ≈-57, ψ≈-47) give a regular, "
+        "physically sensible backbone for the optimizer to start from.",
+    )
+    pconf_key = {"extended (β strand)": "extended", "alpha helix": "alpha",
+                 "polyproline-II": "polypro", "random coil": None}[pep_conf]
     name = st.sidebar.text_input("Peptide name", value="peptide")
     if st.sidebar.button("Build peptide & generate 3D", type="primary"):
         try:
             with st.spinner("Building peptide backbone…"):
                 mol = from_fasta(seq)
-                m3d, info = embed_and_optimize(mol, force_field=FF, name=name, title=name)
-            _finalize(m3d, info, f"Peptide: {seq.strip()[:40]}")
+                m3d, info = embed_and_optimize(
+                    mol, force_field=FF, name=name, title=name,
+                    conformation=pconf_key, align=align_axes,
+                )
+            _finalize(m3d, info, f"Peptide {seq.strip()[:30]} ({pep_conf})")
         except Exception as exc:
             _handle_error(exc)
 
@@ -273,16 +314,42 @@ else:  # Upload file
         help="PDB/XYZ coordinates are kept as-is by default (experimental "
         "geometry preserved). Enable to run a force-field cleanup.",
     )
+    xyz_bonds = st.sidebar.checkbox(
+        "XYZ: perceive bonds + charge (rdDetermineBonds)", value=True,
+        help="For .xyz files with no connectivity, infer bonds and bond orders "
+        "from the geometry and derive the spin multiplicity.",
+    )
+    cif_mode = st.sidebar.selectbox(
+        "CIF handling", ["cluster (finite, gas-phase)", "unit cell", "supercell 2×2×2"],
+        help="How to turn a crystal into a Gaussian-ready structure.",
+    )
     if up is not None and st.sidebar.button("Load structure", type="primary"):
         try:
             raw = up.read().decode("utf-8", errors="replace")
             ext = up.name.rsplit(".", 1)[-1].lower()
+            info = "Loaded from file"
             if ext == "pdb":
                 m3d = from_pdb_block(raw, is_cif=False)
             elif ext == "cif":
-                m3d = from_pdb_block(raw, is_cif=True)
+                mode_map = {"cluster (finite, gas-phase)": ("cluster", (1, 1, 1)),
+                            "unit cell": ("cell", (1, 1, 1)),
+                            "supercell 2×2×2": ("supercell", (2, 2, 2))}
+                cmode, scell = mode_map[cif_mode]
+                m3d = from_cif(raw, mode=cmode, supercell=scell)
+                info = f"Loaded CIF ({cmode})"
             elif ext == "xyz":
-                m3d = from_xyz_block(raw)
+                if xyz_bonds:
+                    try:
+                        mol, radicals = xyz_perceive_bonds(raw, charge=0)
+                        m3d = Molecule3D.from_rdkit(mol, name=up.name, title=up.name)
+                        if radicals:
+                            m3d.multiplicity = radicals + 1
+                        info = "Loaded XYZ (bonds perceived)"
+                    except Exception:
+                        m3d = from_xyz_block(raw)
+                        info = "Loaded XYZ (coordinates only; bond perception failed)"
+                else:
+                    m3d = from_xyz_block(raw)
             else:  # mol / sdf -> parse via RDKit then embed if needed
                 from rdkit import Chem
 
@@ -291,13 +358,14 @@ else:  # Upload file
                 if mol is None:
                     raise InputError(f"Could not parse {up.name}")
                 if mol.GetNumConformers() == 0:
-                    m3d, _ = embed_and_optimize(mol, force_field=FF, name=up.name)
+                    m3d, info = embed_and_optimize(
+                        mol, force_field=FF, name=up.name, align=align_axes
+                    )
                 else:
                     m3d = Molecule3D.from_rdkit(mol, name=up.name, title=up.name)
-            info = "Loaded from file"
             if reopt:
                 note = editor.cleanup_geometry(m3d, force_field=FF)
-                info = note or "Loaded from file (cleanup unavailable)"
+                info = note or info + " (cleanup unavailable)"
             m3d.name = up.name.rsplit(".", 1)[0]
             _finalize(m3d, info, f"Uploaded {up.name}")
         except Exception as exc:
@@ -453,15 +521,38 @@ ec4.caption(
 st.markdown("---")
 st.subheader("Export for GaussView / Gaussian")
 
+# Export MODE: curated route sections with SCF-stabilizing keywords.
+mode_labels = {k: v["label"] for k, v in EXPORT_MODES.items()}
+mode_key = st.radio(
+    "Export mode",
+    list(EXPORT_MODES.keys()),
+    format_func=lambda k: mode_labels[k],
+    horizontal=False,
+)
+st.caption(EXPORT_MODES[mode_key]["description"])
+
+# Dynamic resource suggestion scaled to the atom count.
+sug_mem, sug_nproc = suggest_resources(len(mol))
+
 gc1, gc2 = st.columns([1, 1])
 with gc1:
-    preset = st.selectbox("Route preset", list(ROUTE_PRESETS.keys()))
-    route = st.text_input("Route section", value=ROUTE_PRESETS[preset])
+    route_source = st.radio(
+        "Route from", ["Export mode", "Preset", "Custom"], horizontal=True,
+    )
+    if route_source == "Export mode":
+        default_route = mode_route(mode_key)
+    elif route_source == "Preset":
+        preset = st.selectbox("Route preset", list(ROUTE_PRESETS.keys()))
+        default_route = ROUTE_PRESETS[preset]
+    else:  # Custom — start from the current mode route, fully editable
+        default_route = mode_route(mode_key)
+    route = st.text_input("Route section", value=default_route)
     title = st.text_input("Job title", value=mol.title)
     chk = st.text_input("%chk file", value=f"{mol.name}.chk")
 with gc2:
-    mem = st.text_input("%mem", value="4GB")
-    nproc = st.number_input("%nprocshared", 1, 256, value=4, step=1)
+    st.caption(f"Suggested for {len(mol)} atoms: %mem={sug_mem}, %nprocshared={sug_nproc}")
+    mem = st.text_input("%mem", value=sug_mem)
+    nproc = st.number_input("%nprocshared", 1, 256, value=sug_nproc, step=1)
     fmt = st.radio("File format", [".gjf", ".com"], horizontal=True)
 
 # --- genecp / mixed-basis helper (ECP for heavy metals) ---------------------

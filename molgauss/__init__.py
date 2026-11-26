@@ -21,6 +21,8 @@ from .inputs import (
     from_fasta,
     from_pdb_block,
     from_xyz_block,
+    xyz_perceive_bonds,
+    from_cif,
     build_polymer,
 )
 from .geometry import embed_and_optimize, GeometryError
@@ -29,10 +31,15 @@ from .gaussian import (
     write_xyz,
     RouteConfig,
     build_genecp_tail,
+    suggest_resources,
+    mode_route,
     ROUTE_PRESETS,
+    EXPORT_MODES,
     HEAVY_ELEMENTS_FOR_ECP,
 )
+from .refine import refine, align_principal_axes, detect_clashes, RefineReport
 from . import editor
+from . import conformers
 
 __all__ = [
     "Atom",
@@ -45,15 +52,25 @@ __all__ = [
     "from_fasta",
     "from_pdb_block",
     "from_xyz_block",
+    "xyz_perceive_bonds",
+    "from_cif",
     "build_polymer",
     "embed_and_optimize",
     "write_gjf",
     "write_xyz",
     "RouteConfig",
     "build_genecp_tail",
+    "suggest_resources",
+    "mode_route",
     "ROUTE_PRESETS",
+    "EXPORT_MODES",
     "HEAVY_ELEMENTS_FOR_ECP",
+    "refine",
+    "align_principal_axes",
+    "detect_clashes",
+    "RefineReport",
     "editor",
+    "conformers",
 ]
 
 __version__ = "1.0.0"

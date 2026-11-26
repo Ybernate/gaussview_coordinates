@@ -256,3 +256,92 @@ def from_xyz_block(block: str) -> Molecule3D:
     mol = Molecule3D(atoms=atoms, title="Structure from XYZ", name="structure")
     mol.multiplicity = mol.suggest_multiplicity()
     return mol
+
+
+def xyz_perceive_bonds(block: str, charge: int = 0) -> Tuple[Chem.Mol, int]:
+    """Parse an XYZ block and perceive connectivity with ``rdDetermineBonds``.
+
+    XYZ files carry no bond information. RDKit's ``rdDetermineBonds`` infers
+    both connectivity and bond orders from the 3D geometry, which also lets us
+    assign a sensible total charge and spin multiplicity. Returns
+    ``(mol, radical_electron_count)``; a non-zero radical count means the system
+    is open-shell and the multiplicity should reflect that.
+
+    Falls back to a connectivity-only perception if bond-order assignment fails
+    (common for radicals / unusual valences).
+    """
+    from rdkit.Chem import rdDetermineBonds
+
+    # Build a bare mol from the coordinates via an XYZ block RDKit can read.
+    raw = Chem.MolFromXYZBlock(block)
+    if raw is None:
+        # Normalise through our own parser then re-serialise to a clean block.
+        m3d = from_xyz_block(block)
+        raw = Chem.MolFromXYZBlock(m3d.to_xyz_block())
+    if raw is None:
+        raise InputError("RDKit could not read the XYZ coordinates")
+
+    mol = Chem.Mol(raw)
+    try:
+        rdDetermineBonds.DetermineBonds(mol, charge=int(charge))
+    except Exception:
+        try:
+            rdDetermineBonds.DetermineConnectivity(mol)
+            Chem.SanitizeMol(mol, catchErrors=True)
+        except Exception as exc:
+            raise InputError(
+                f"Could not perceive bonds from the XYZ geometry: {exc}"
+            ) from exc
+
+    radicals = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
+    return mol, radicals
+
+
+# ----------------------------------------------------------- CIF crystal (ASE)
+def from_cif(
+    block: str, mode: str = "cell", supercell: Tuple[int, int, int] = (1, 1, 1)
+) -> Molecule3D:
+    """Load a crystallographic CIF via ASE and return a ``Molecule3D``.
+
+    ``mode``:
+        * ``"cell"``     – atoms of the (optionally repeated) unit cell.
+        * ``"supercell"``– unit cell repeated by ``supercell`` factors.
+        * ``"cluster"``  – same atoms but with cell/PBC info dropped, giving a
+          finite molecular cluster suitable for a gas-phase Gaussian job.
+
+    Requires ASE. The cell vectors are reported in the title for reference.
+    """
+    try:
+        import ase.io
+        from io import StringIO
+    except ImportError as exc:  # pragma: no cover
+        raise InputError("ASE is required to read CIF files (pip install ase)") from exc
+
+    try:
+        atoms_obj = ase.io.read(StringIO(block), format="cif")
+    except Exception as exc:
+        raise InputError(f"ASE could not parse the CIF: {exc}") from exc
+
+    if mode == "supercell" and tuple(supercell) != (1, 1, 1):
+        atoms_obj = atoms_obj.repeat(supercell)
+
+    from .molmodel import Atom as _Atom
+
+    cell = atoms_obj.get_cell()
+    atoms = [
+        _Atom(sym, float(p[0]), float(p[1]), float(p[2]))
+        for sym, p in zip(atoms_obj.get_chemical_symbols(), atoms_obj.get_positions())
+    ]
+    if not atoms:
+        raise InputError("CIF produced no atoms")
+
+    title = f"Structure from CIF ({mode})"
+    try:
+        lengths = atoms_obj.cell.lengths()
+        title += f" a,b,c = {lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f} A"
+    except Exception:
+        pass
+
+    mol = Molecule3D(atoms=atoms, title=title, name="crystal")
+    mol.multiplicity = mol.suggest_multiplicity()
+    return mol

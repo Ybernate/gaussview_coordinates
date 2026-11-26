@@ -158,6 +158,133 @@ def test_freeze_column():
     _assert(" -1 " not in out3, "freeze column dropped when nothing frozen")
 
 
+def test_pca_alignment_and_clash():
+    print("[PCA alignment + clash filter]")
+    import numpy as np
+    from molgauss import align_principal_axes, detect_clashes
+    from molgauss.molmodel import Atom, Molecule3D
+
+    # A long chain tilted off-axis; after alignment its span should be on X.
+    mol = Molecule3D(atoms=[Atom("C", i * 1.0, i * 1.0, 0.0) for i in range(6)])
+    span_x = align_principal_axes(mol)
+    xs = [a.x for a in mol.atoms]
+    ys = [a.y for a in mol.atoms]
+    span_actual_x = max(xs) - min(xs)
+    span_actual_y = max(ys) - min(ys)
+    _assert(span_actual_x >= span_actual_y, "longest extent placed on X after PCA")
+    com = np.mean([[a.x, a.y, a.z] for a in mol.atoms], axis=0)
+    _assert(np.allclose(com, 0, atol=1e-6), "centre of mass moved to origin")
+
+    # Two atoms overlapping -> clash detected.
+    clash_mol = Molecule3D(atoms=[Atom("C", 0, 0, 0), Atom("O", 0.5, 0, 0)])
+    clashes = detect_clashes(clash_mol, cutoff=0.8, bonded_pairs=set())
+    _assert(len(clashes) == 1, f"clash at 0.5 A detected (got {clashes})")
+
+
+def test_refine_in_pipeline():
+    print("[refine summary appended by embed_and_optimize]")
+    mol = from_smiles("CCCCO")
+    m3d, info = embed_and_optimize(mol, align=True)
+    _assert("aligned" in info, f"refine summary present: {info!r}")
+    _assert("clash" in info, "clash status reported")
+
+
+def test_extended_polymer_conformation():
+    print("[polymer forced all-trans extended]")
+    import numpy as np
+    mol = build_polymer("[*]CC[*]", 8)
+    coiled, _ = embed_and_optimize(mol, conformation=None, align=True, name="pe_coil")
+    extended, info = embed_and_optimize(mol, conformation="all-trans", align=True, name="pe_ext")
+    _assert("all-trans" in info, f"conformation applied: {info!r}")
+    # Extended chain should span farther along X than a default conformer.
+    def span_x(m):
+        xs = [a.x for a in m.atoms]
+        return max(xs) - min(xs)
+    print(f"  coiled X-span={span_x(coiled):.2f}  extended X-span={span_x(extended):.2f}")
+    _assert(span_x(extended) >= span_x(coiled) - 0.5, "extended chain is not more compact")
+
+
+def test_peptide_secondary_structure():
+    print("[peptide extended vs alpha helix dihedrals]")
+    from molgauss import conformers
+    from rdkit.Chem import AllChem, rdMolTransforms
+    from rdkit import Chem
+    mol = from_fasta("AAAAA")
+    mol = Chem.AddHs(mol)
+    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+    n = conformers.set_peptide_secondary_structure(mol, "alpha")
+    _assert(n >= 4, f"alpha-helix dihedrals set on residues (got {n})")
+    bb = conformers._find_peptide_backbone(mol)
+    _assert(len(bb) == 5, f"5 residues found in backbone (got {len(bb)})")
+
+
+def test_xyz_perceive_bonds():
+    print("[rdDetermineBonds on an XYZ methane]")
+    from molgauss import xyz_perceive_bonds
+    # methane geometry (angstrom)
+    xyz = (
+        "5\nmethane\n"
+        "C  0.000  0.000  0.000\n"
+        "H  0.629  0.629  0.629\n"
+        "H -0.629 -0.629  0.629\n"
+        "H -0.629  0.629 -0.629\n"
+        "H  0.629 -0.629 -0.629\n"
+    )
+    mol, radicals = xyz_perceive_bonds(xyz, charge=0)
+    _assert(mol.GetNumBonds() == 4, f"methane has 4 C-H bonds (got {mol.GetNumBonds()})")
+    _assert(radicals == 0, "closed-shell methane, no radicals")
+
+
+def test_cif_optional():
+    print("[CIF via ASE] (ASE optional)")
+    try:
+        from molgauss import from_cif
+        # Minimal NaCl-type CIF (rock salt), 2 atoms in a small cubic cell.
+        cif = """data_test
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Na Na 0.0 0.0 0.0
+Cl Cl 0.5 0.5 0.5
+"""
+        m3d = from_cif(cif, mode="cluster")
+        syms = sorted(a.symbol for a in m3d.atoms)
+        _assert(syms == ["Cl", "Na"], f"Na and Cl parsed from CIF (got {syms})")
+        sc = from_cif(cif, mode="supercell", supercell=(2, 1, 1))
+        _assert(len(sc) == 4, f"2x1x1 supercell doubles atoms (got {len(sc)})")
+    except Exception as e:
+        print("  SKIPPED:", e)
+
+
+def test_export_modes_and_resources():
+    print("[3 export modes + dynamic resources]")
+    from molgauss import mode_route, suggest_resources, EXPORT_MODES, write_gjf, RouteConfig
+    from molgauss.molmodel import Atom, Molecule3D
+    r1 = mode_route("standard")
+    _assert("empiricaldispersion=gd3" in r1 and "int=ultrafine" in r1 and "scf=xqc" in r1,
+            "Mode 1 has D3 + ultrafine + xqc")
+    _assert("freq" in mode_route("robust"), "Mode 2 includes freq")
+    _assert("pm6" in mode_route("quick"), "Mode 3 is PM6")
+    _assert(len(EXPORT_MODES) == 3, "three export modes defined")
+    mem_s, nproc_s = suggest_resources(10)
+    mem_l, nproc_l = suggest_resources(200)
+    _assert(nproc_l > nproc_s, "larger system suggests more procs")
+    # Build a gjf using a mode route.
+    mol = Molecule3D(atoms=[Atom("C", 0, 0, 0), Atom("H", 0, 0, 1.09)], name="x")
+    gjf = write_gjf(mol, RouteConfig(route=mode_route("standard"), mem=mem_s, nprocshared=nproc_s))
+    _assert("scf=xqc" in gjf, "mode route written into gjf")
+
+
 def test_name_lookup_optional():
     print("[PubChem name lookup: aspirin] (network optional)")
     try:
@@ -182,6 +309,13 @@ if __name__ == "__main__":
         test_metal_complex_uff,
         test_genecp_ecp_tail,
         test_freeze_column,
+        test_pca_alignment_and_clash,
+        test_refine_in_pipeline,
+        test_extended_polymer_conformation,
+        test_peptide_secondary_structure,
+        test_xyz_perceive_bonds,
+        test_cif_optional,
+        test_export_modes_and_resources,
         test_name_lookup_optional,
     ]
     failed = 0

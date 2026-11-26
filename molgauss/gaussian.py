@@ -19,7 +19,7 @@ omitting it is the single most common cause of GaussView refusing the file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .molmodel import Molecule3D
 
@@ -34,6 +34,39 @@ ROUTE_PRESETS = {
     "Transition-metal opt (UB3LYP/LANL2DZ)": "# opt ub3lyp/lanl2dz",
     "Mixed basis / ECP for heavy metals (B3LYP/genecp)": "# opt b3lyp/genecp",
     "Mixed basis / ECP opt+freq (B3LYP/genecp)": "# opt freq b3lyp/genecp",
+}
+
+# ---------------------------------------------------------------------------
+# Export MODES: curated route sections that add the keywords which keep the SCF
+# stable and the optimizer from stalling, so Gaussian spends fewer cycles.
+#
+#   int=ultrafine         finer DFT integration grid (smooth PES, fewer failed
+#                         steps on flat surfaces).
+#   scf=xqc               quadratic-convergence SCF fallback (recovers from SCF
+#                         oscillation instead of crashing).
+#   empiricaldispersion=gd3  Grimme D3 dispersion (correct van der Waals, vital
+#                         for polymers, peptides and stacked systems).
+# ---------------------------------------------------------------------------
+EXPORT_MODES = {
+    "standard": {
+        "label": "Mode 1 — Enhanced standard DFT opt (recommended)",
+        "route": "# opt b3lyp/6-31g(d) empiricaldispersion=gd3 int=ultrafine scf=xqc",
+        "description": "B3LYP/6-31G(d) with D3 dispersion, ultrafine grid and "
+        "XQC SCF. Good default for medium molecules and polymers.",
+    },
+    "robust": {
+        "label": "Mode 2 — Robust opt+freq for tough SCF / larger systems",
+        "route": "# opt=(maxcycles=200,calcfc) freq b3lyp/6-31g(d) "
+        "empiricaldispersion=gd3 int=ultrafine scf=(xqc,maxcycle=300)",
+        "description": "Adds opt+freq, initial force constants (calcfc), extra "
+        "optimizer/SCF cycles. For flexible or hard-to-converge systems.",
+    },
+    "quick": {
+        "label": "Mode 3 — Fast pre-screen (semi-empirical PM6)",
+        "route": "# opt pm6",
+        "description": "Semi-empirical PM6 optimization. Very fast rough clean-up "
+        "or sanity check before a DFT run.",
+    },
 }
 
 # Elements that genecp treats as "heavy": they need an effective core potential
@@ -71,6 +104,31 @@ class RouteConfig:
         if not r.startswith("#"):
             r = "# " + r
         return r
+
+
+def suggest_resources(n_atoms: int) -> Tuple[str, int]:
+    """Pick (%mem, %nprocshared) scaled to system size.
+
+    A rough, conservative heuristic so small jobs don't over-request and large
+    ones aren't starved. Users can always override in the UI.
+    """
+    if n_atoms <= 20:
+        return "4GB", 4
+    if n_atoms <= 60:
+        return "8GB", 8
+    if n_atoms <= 150:
+        return "16GB", 16
+    return "32GB", 24
+
+
+def mode_route(mode: str) -> str:
+    """Return the curated route section for an export mode key."""
+    try:
+        return EXPORT_MODES[mode]["route"]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown export mode {mode!r}; use one of {list(EXPORT_MODES)}"
+        ) from exc
 
 
 def _format_atom_line(

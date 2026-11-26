@@ -26,7 +26,11 @@ from molgauss import (
     xyz_perceive_bonds,
     from_cif,
     build_polymer,
+    END_GROUP_PRESETS,
     embed_and_optimize,
+    search_conformers,
+    refine,
+    build_report,
     write_gjf,
     write_xyz,
     RouteConfig,
@@ -39,6 +43,7 @@ from molgauss import (
     editor,
 )
 from molgauss.molmodel import Atom, Molecule3D, symbol_to_atomic_number
+from rdkit import Chem
 
 # --------------------------------------------------------------------------- #
 # Page config
@@ -63,6 +68,8 @@ def _init_state() -> None:
     st.session_state.setdefault("mol", None)          # Molecule3D or None
     st.session_state.setdefault("method_info", "")    # how it was generated
     st.session_state.setdefault("source_note", "")
+    st.session_state.setdefault("conf_table", None)   # conformer-search table
+    st.session_state.setdefault("conf_note", "")      # xTB/MMFF caveat
 
 
 _init_state()
@@ -256,26 +263,43 @@ elif input_mode == "Polymer (monomer + n)":
         help="e.g. [*]CC[*] = polyethylene, [*]CC(c1ccccc1)[*] = polystyrene",
     )
     n_units = st.sidebar.number_input("Degree of polymerization (n)", 1, 200, value=5, step=1)
-    cap = st.sidebar.text_input("End-cap element", value="H")
-    poly_conf = st.sidebar.selectbox(
-        "Backbone conformation",
-        ["all-trans (extended)", "tgt (trans-gauche helix)", "random coil"],
-        help="Extended / regular backbones are far better DFT starting points "
-        "than random coils and converge faster in Gaussian.",
+    cap_options = list(END_GROUP_PRESETS.keys())
+    cc1, cc2 = st.sidebar.columns(2)
+    cap_left = cc1.selectbox("Left end group", cap_options, index=cap_options.index("H"))
+    cap_right = cc2.selectbox("Right end group", cap_options, index=cap_options.index("H"))
+    search_mode = st.sidebar.checkbox(
+        "Energy-search conformers (GFN2-xTB)", value=True,
+        help="Generate several type-aware and random conformers, relax each, and "
+        "keep the lowest-energy one. More reliable than a single fixed pattern. "
+        "Falls back to MMFF ranking if xTB is not installed.",
     )
-    conf_key = {"all-trans (extended)": "all-trans",
-                "tgt (trans-gauche helix)": "tgt",
-                "random coil": None}[poly_conf]
+    n_random = st.sidebar.slider("Random conformers to sample", 0, 24, 8) if search_mode else 0
     name = st.sidebar.text_input("Polymer name", value="polymer")
     if st.sidebar.button("Build polymer & generate 3D", type="primary"):
         try:
             with st.spinner(f"Building chain of {n_units} units…"):
-                mol = build_polymer(monomer, int(n_units), cap=cap)
-                m3d, info = embed_and_optimize(
-                    mol, force_field=FF, name=name, title=name,
-                    conformation=conf_key, align=align_axes,
-                )
-            _finalize(m3d, info, f"Polymer {monomer} × {n_units} ({poly_conf})")
+                mol = build_polymer(monomer, int(n_units),
+                                    cap_left=cap_left, cap_right=cap_right)
+                formula = Chem.rdMolDescriptors.CalcMolFormula(Chem.AddHs(mol))
+                if search_mode:
+                    res = search_conformers(
+                        mol,
+                        chain_families=["all-trans", "gauche-1sign", "gauche-alt"],
+                        n_random=int(n_random), use_xtb=True, name=name, title=name,
+                    )
+                    m3d = res.best
+                    refine(m3d, align=align_axes)
+                    info = f"Energy search ({res.method}); best = {res.candidates[0].source}"
+                    st.session_state.conf_table = res.table()
+                    st.session_state.conf_note = res.note
+                else:
+                    m3d, info = embed_and_optimize(
+                        mol, force_field=FF, name=name, title=name,
+                        conformation="all-trans", align=align_axes,
+                    )
+                    st.session_state.conf_table = None
+            _finalize(m3d, info, f"Polymer {monomer} × {n_units} — {formula} "
+                      f"(caps {cap_left}/{cap_right})")
         except Exception as exc:
             _handle_error(exc)
 
@@ -521,7 +545,20 @@ ec4.caption(
 st.markdown("---")
 st.subheader("Export for GaussView / Gaussian")
 
-# Export MODE: curated route sections with SCF-stabilizing keywords.
+# Conformer-search table, if the current molecule came from an energy search.
+if st.session_state.get("conf_table"):
+    with st.expander("Conformer energy search (ranked candidates)", expanded=False):
+        st.caption(st.session_state.get("conf_note", ""))
+        st.code(st.session_state["conf_table"], language="text")
+
+# Target Gaussian version controls the integration-grid keyword (P1-2a).
+gver = st.radio(
+    "Target Gaussian version", ["G16", "G09"], horizontal=True,
+    help="UltraFine is the default DFT grid in G16, so int=ultrafine is omitted "
+    "there (redundant). For G09 (default FineGrid) it is added automatically.",
+)
+
+# Export MODE: route sections built version-aware (no baked-in redundant grid).
 mode_labels = {k: v["label"] for k, v in EXPORT_MODES.items()}
 mode_key = st.radio(
     "Export mode",
@@ -531,8 +568,18 @@ mode_key = st.radio(
 )
 st.caption(EXPORT_MODES[mode_key]["description"])
 
-# Dynamic resource suggestion scaled to the atom count.
-sug_mem, sug_nproc = suggest_resources(len(mol))
+# Resources from the user's hardware (P1-2d), not just atom count.
+hw1, hw2 = st.columns(2)
+phys_cores = hw1.number_input(
+    "Physical CPU cores available", 1, 512, value=8, step=1,
+    help="%nprocshared should use physical cores (not hyperthreads).",
+)
+ram_gb = hw2.number_input(
+    "Total RAM (GB)", 1, 4096, value=16, step=1,
+    help="%mem is set below this with headroom for the OS and Gaussian.",
+)
+sug_mem, sug_nproc = suggest_resources(len(mol), physical_cores=int(phys_cores),
+                                       ram_gb=float(ram_gb))
 
 gc1, gc2 = st.columns([1, 1])
 with gc1:
@@ -540,19 +587,20 @@ with gc1:
         "Route from", ["Export mode", "Preset", "Custom"], horizontal=True,
     )
     if route_source == "Export mode":
-        default_route = mode_route(mode_key)
+        default_route = mode_route(mode_key, gaussian_version=gver)
     elif route_source == "Preset":
         preset = st.selectbox("Route preset", list(ROUTE_PRESETS.keys()))
         default_route = ROUTE_PRESETS[preset]
     else:  # Custom — start from the current mode route, fully editable
-        default_route = mode_route(mode_key)
+        default_route = mode_route(mode_key, gaussian_version=gver)
     route = st.text_input("Route section", value=default_route)
     title = st.text_input("Job title", value=mol.title)
     chk = st.text_input("%chk file", value=f"{mol.name}.chk")
 with gc2:
-    st.caption(f"Suggested for {len(mol)} atoms: %mem={sug_mem}, %nprocshared={sug_nproc}")
+    st.caption(f"Suggested ({len(mol)} atoms, {int(phys_cores)} cores, "
+               f"{int(ram_gb)} GB): %mem={sug_mem}, %nprocshared={sug_nproc}")
     mem = st.text_input("%mem", value=sug_mem)
-    nproc = st.number_input("%nprocshared", 1, 256, value=sug_nproc, step=1)
+    nproc = st.number_input("%nprocshared", 1, 512, value=sug_nproc, step=1)
     fmt = st.radio("File format", [".gjf", ".com"], horizontal=True)
 
 # --- genecp / mixed-basis helper (ECP for heavy metals) ---------------------
@@ -595,6 +643,24 @@ tail = st.text_area(
 
 cfg = RouteConfig(route=route, chk=chk, mem=mem, nprocshared=int(nproc), tail=tail)
 mol.title = title
+
+# --- Pre-export report (P1-3) ----------------------------------------------
+# Guess the basis from the route (token after the method "/") for the estimate.
+_basis_guess = "6-31g(d)"
+for tok in route.split():
+    if "/" in tok and not tok.startswith(("scf", "int", "opt")):
+        _basis_guess = tok.split("/", 1)[1]
+        break
+with st.expander("Pre-export report (check before running Gaussian)", expanded=True):
+    try:
+        rep = build_report(mol, basis=_basis_guess)
+        if rep.ok():
+            st.success("No blocking problems detected.")
+        else:
+            st.warning("Review the flagged items before running Gaussian.")
+        st.code(rep.text(), language="text")
+    except Exception as exc:
+        st.info(f"Report unavailable: {exc}")
 
 gjf_text = write_gjf(mol, cfg)
 xyz_text = write_xyz(mol)

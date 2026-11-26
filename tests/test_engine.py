@@ -267,22 +267,103 @@ Cl Cl 0.5 0.5 0.5
 
 
 def test_export_modes_and_resources():
-    print("[3 export modes + dynamic resources]")
+    print("[3 export modes + version-aware grid + resources]")
     from molgauss import mode_route, suggest_resources, EXPORT_MODES, write_gjf, RouteConfig
     from molgauss.molmodel import Atom, Molecule3D
-    r1 = mode_route("standard")
-    _assert("empiricaldispersion=gd3" in r1 and "int=ultrafine" in r1 and "scf=xqc" in r1,
-            "Mode 1 has D3 + ultrafine + xqc")
-    _assert("freq" in mode_route("robust"), "Mode 2 includes freq")
-    _assert("pm6" in mode_route("quick"), "Mode 3 is PM6")
+    # Mode 1: D3 dispersion always; grid is version-aware.
+    r1_g16 = mode_route("standard", gaussian_version="G16")
+    r1_g09 = mode_route("standard", gaussian_version="G09")
+    _assert("empiricaldispersion=gd3" in r1_g16, "Mode 1 has D3 dispersion")
+    _assert("int=ultrafine" not in r1_g16, "G16 omits redundant int=ultrafine (verified default)")
+    _assert("int=ultrafine" in r1_g09, "G09 adds int=ultrafine (its default is coarser)")
+    _assert("scf=xqc" not in r1_g16, "scf=xqc is NOT default in Mode 1")
+    # Mode 2: opt+freq in one job, with xqc.
+    r2 = mode_route("robust")
+    _assert("freq" in r2 and "opt" in r2, "Mode 2 is opt+freq in one job")
+    _assert("scf=xqc" in r2, "Mode 2 opts into scf=xqc")
+    _assert("calcfc" in r2, "Mode 2 uses calcfc")
+    # Mode 3: PM6, no basis slash.
+    r3 = mode_route("quick")
+    _assert("pm6" in r3 and "/" not in r3, "Mode 3 is PM6 with no basis slash")
     _assert(len(EXPORT_MODES) == 3, "three export modes defined")
+    # Resources from hardware, not only atom count.
+    mem_hw, nproc_hw = suggest_resources(10, physical_cores=32, ram_gb=64)
+    _assert(nproc_hw <= 32, "nproc capped by physical cores / size")
+    _assert(int(mem_hw.rstrip("GB")) < 64, "mem leaves RAM headroom")
     mem_s, nproc_s = suggest_resources(10)
     mem_l, nproc_l = suggest_resources(200)
-    _assert(nproc_l > nproc_s, "larger system suggests more procs")
-    # Build a gjf using a mode route.
+    _assert(nproc_l >= nproc_s, "larger system allows >= procs")
     mol = Molecule3D(atoms=[Atom("C", 0, 0, 0), Atom("H", 0, 0, 1.09)], name="x")
-    gjf = write_gjf(mol, RouteConfig(route=mode_route("standard"), mem=mem_s, nprocshared=nproc_s))
+    gjf = write_gjf(mol, RouteConfig(route=mode_route("robust"), mem=mem_s, nprocshared=nproc_s))
     _assert("scf=xqc" in gjf, "mode route written into gjf")
+
+
+def test_preexport_report():
+    print("[P1-3 pre-export report: parity, vdW clashes, basis estimate]")
+    from molgauss import build_report
+    from molgauss.molmodel import Atom, Molecule3D
+
+    # Good closed-shell molecule (water).
+    w = from_smiles("O")
+    w3d, _ = embed_and_optimize(w, name="water", align=False)
+    rep = build_report(w3d, basis="6-31g(d)")
+    _assert(rep.parity_ok, "water parity OK")
+    _assert(rep.n_basis_estimate is not None and rep.n_basis_estimate > 0,
+            f"basis functions estimated ({rep.n_basis_estimate})")
+    # 6-31G(d) water: O=15, 2H=2*2=4 -> 19
+    _assert(rep.n_basis_estimate == 19, f"water 6-31G(d) = 19 funcs (got {rep.n_basis_estimate})")
+
+    # Parity error: even electrons with multiplicity 2.
+    bad = Molecule3D(atoms=[Atom("O", 0, 0, 0), Atom("H", 0, 0, 1.0), Atom("H", 1.0, 0, 0)],
+                     charge=0, multiplicity=2)
+    rbad = build_report(bad)
+    _assert(not rbad.parity_ok, "even electrons + mult 2 flagged as parity error")
+
+    # vdW clash: a real folded structure where two topologically-distant atoms
+    # overlap. Build butane and fold it so the two terminal carbons sit ~2.0 A
+    # apart (a non-bonded C..C contact well inside the vdW sum ~3.4 A, but not a
+    # bond). Verified by construction: C0 and C3 are 1-4, so not 1-2/1-3 masked.
+    from molgauss import vdw_clashes
+    clash = Molecule3D(atoms=[
+        Atom("C", 0.00, 0.00, 0.00),
+        Atom("C", 1.50, 0.00, 0.00),
+        Atom("C", 1.90, 1.40, 0.00),
+        Atom("C", 0.60, 2.00, 0.00),   # C3 is ~2.08 A from C0, 1-4 relationship
+    ])
+    cl = vdw_clashes(clash, overlap_factor=0.75)
+    _assert(len(cl) >= 1, f"non-bonded 1-4 C..C vdW clash detected (got {cl})")
+
+
+def test_type_aware_conformers():
+    print("[P0-3 type-aware chain torsions vs legacy index]")
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    from molgauss import conformers as conf
+    m = Chem.AddHs(build_polymer("[*]OCC[*]", 4, cap_left="H", cap_right="OH"))
+    AllChem.EmbedMolecule(m, AllChem.ETKDGv3())
+    AllChem.MMFFOptimizeMolecule(m)
+    applied = conf.set_chain_conformation(m, family="gauche-1sign")
+    # Every C-C backbone bond must be trans(180), every C-O/O-C bond gauche(60).
+    for (a, b, c, d, eb, ec, tgt) in applied:
+        if {eb, ec} == {"C"}:
+            _assert(abs(tgt - 180.0) < 1e-6, "C-C bond -> trans 180")
+        if "O" in (eb, ec):
+            _assert(abs(tgt - 60.0) < 1e-6, "C-O/O-C bond -> gauche 60 (type-aware)")
+    _assert(len(applied) > 0, "type-aware torsions applied")
+
+
+def test_conformer_search_mmff_fallback():
+    print("[P1-1 conformer search runs (xTB or MMFF fallback)]")
+    from molgauss import search_conformers
+    res = search_conformers(
+        build_polymer("[*]CC[*]", 3, cap="H"),
+        chain_families=["all-trans", "gauche-1sign"],
+        n_random=2, use_xtb=True, name="pe3",
+    )
+    _assert(len(res.candidates) >= 3, f"candidates generated ({len(res.candidates)})")
+    _assert(res.candidates[0].energy == 0.0, "best candidate is the zero reference")
+    _assert(res.method in ("GFN2-xTB", "MMFF94"), f"ranking method set ({res.method})")
+    _assert("NOT DFT" in res.note or "MMFF" in res.note, "note warns about method")
 
 
 def test_name_lookup_optional():
@@ -316,6 +397,9 @@ if __name__ == "__main__":
         test_xyz_perceive_bonds,
         test_cif_optional,
         test_export_modes_and_resources,
+        test_preexport_report,
+        test_type_aware_conformers,
+        test_conformer_search_mmff_fallback,
         test_name_lookup_optional,
     ]
     failed = 0

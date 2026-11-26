@@ -9,3 +9,7 @@ biopython==1.88
 pandas==3.1.1
 ase==3.29.0
 numpy==2.4.6
+
+# Optional (GFN2-xTB conformer ranking). The app degrades to MMFF ranking if
+# absent. Install with:  pip install tblite ase   (verified: tblite==0.8.0)
+# tblite==0.8.0

@@ -24,8 +24,16 @@ from .inputs import (
     xyz_perceive_bonds,
     from_cif,
     build_polymer,
+    END_GROUP_PRESETS,
 )
-from .geometry import embed_and_optimize, GeometryError
+from .geometry import (
+    embed_and_optimize,
+    GeometryError,
+    search_conformers,
+    ConformerSearchResult,
+    ConformerCandidate,
+)
+from . import energy
 from .gaussian import (
     write_gjf,
     write_xyz,
@@ -38,6 +46,8 @@ from .gaussian import (
     HEAVY_ELEMENTS_FOR_ECP,
 )
 from .refine import refine, align_principal_axes, detect_clashes, RefineReport
+from .report import build_report, PreExportReport, vdw_clashes
+from .gaussian import build_route
 from . import editor
 from . import conformers
 
@@ -55,13 +65,22 @@ __all__ = [
     "xyz_perceive_bonds",
     "from_cif",
     "build_polymer",
+    "END_GROUP_PRESETS",
     "embed_and_optimize",
+    "search_conformers",
+    "ConformerSearchResult",
+    "ConformerCandidate",
+    "energy",
     "write_gjf",
     "write_xyz",
     "RouteConfig",
     "build_genecp_tail",
     "suggest_resources",
     "mode_route",
+    "build_route",
+    "build_report",
+    "PreExportReport",
+    "vdw_clashes",
     "ROUTE_PRESETS",
     "EXPORT_MODES",
     "HEAVY_ELEMENTS_FOR_ECP",

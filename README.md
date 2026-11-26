@@ -35,12 +35,16 @@ opens without complaint.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+
+# Install the package (engine + UI deps). Either:
+pip install .                 # from pyproject.toml
+pip install -r requirements.txt   # or the pinned list
 
 # Optional: GFN2-xTB conformer ranking (recommended, far better than MMFF).
-# Pure-pip:
-pip install tblite ase
-# Or, for optimized binaries, via conda-forge:
+pip install ".[xtb]"          # adds tblite to a package install
+# or, if you installed via requirements.txt:
+#   pip install tblite
+# or, for optimized binaries, via conda-forge:
 #   conda install -c conda-forge xtb-python tblite-python ase
 # Without it, the conformer search falls back to MMFF energy ranking.
 
@@ -48,6 +52,9 @@ streamlit run app.py
 ```
 
 Then open the URL Streamlit prints (default http://localhost:8501).
+
+> `ase` is a **base** dependency (the CIF reader needs it); the `[xtb]` extra
+> adds only `tblite` for GFN2-xTB.
 
 ### Option B — Docker (no local Python / RDKit needed)
 
